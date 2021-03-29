@@ -1,38 +1,24 @@
 
 ## KAGGLE: House Prices competition
 
-
 library(tidyverse)
-library(janitor)
-library(mice)
+library(tidymodels)
 
 
 ## Data Loading ----
-train <- read.csv("./data/raw/train.csv", header = TRUE, stringsAsFactors = FALSE)
-test <- read.csv("./data/raw/test.csv", header = TRUE, stringsAsFactors = FALSE)
-
-
-## Data Checks ----
-
-dim(train)
-length(unique(train$Id))
-
-str(train)
-
-summary(train)
-
-
+rawtrain <- read.csv("./data/raw/train.csv", header = TRUE, stringsAsFactors = FALSE)
+rawtest <- read.csv("./data/raw/test.csv", header = TRUE, stringsAsFactors = FALSE)
 
 ## Data Cleaning ----
 
-str(train)
-str(test)
+str(rawtrain)
+str(rawtest)
 
-train$set <- "Train"
-test$SalePrice <- NA
-test$set <- "Test"
+rawtrain$set <- "Train"
+rawtest$SalePrice <- NA
+rawtest$set <- "Test"
 
-comb <- rbind(train, test)
+comb <- rbind(rawtrain, rawtest)
 
 str(comb)
 
@@ -44,7 +30,7 @@ dfclean <- df
 
 
 
-# Check missing values
+# Check missing values ----
 misstab <- apply(df, 2, function(x) sum(is.na(x)))
 missvals <- which(misstab > 0)
 missvars <- names(missvals)
@@ -82,7 +68,7 @@ vartypes
 
 dfclean$MSZoning <- charcheck(df$MSZoning, impNA = TRUE, impNAval = "RL")
 
-dfclean$LotFrontage <- numcheck(df$LotFrontage, impNA = TRUE, impNAval = median(train$LotFrontage, na.rm = TRUE))
+dfclean$LotFrontage <- numcheck(df$LotFrontage, impNA = TRUE, impNAval = median(rawtrain$LotFrontage, na.rm = TRUE))
 
 dfclean$Alley <- charcheck(df$Alley, impNA = TRUE, impNAval = "None")
 
@@ -102,7 +88,7 @@ dfclean$BsmtCond <- charcheck(df$BsmtCond, impNA = TRUE, impNAval = "TA")
 
 dfclean$BsmtExposure <- charcheck(df$BsmtExposure, impNA = TRUE, impNAval = "No")
 
-dfclean$TotalBsmtSF <- numcheck(df$TotalBsmtSF, impNA = TRUE, impNAval = median(train$TotalBsmtSF, na.rm = TRUE))
+dfclean$TotalBsmtSF <- numcheck(df$TotalBsmtSF, impNA = TRUE, impNAval = median(rawtrain$TotalBsmtSF, na.rm = TRUE))
 
 dfclean$Electrical <- charcheck(df$Electrical, impNA = TRUE, impNAval = "SBrkr")
 
@@ -150,17 +136,20 @@ summary(df[missvars])
 # Yes, just the ones we didn't impute
 
 
+# Create new variables
+dfclean$TotSF <- dfclean$TotalBsmtSF + dfclean$X1stFlrSF + dfclean$X2ndFlrSF
+
 # Ensure character variables are correctly represented
 dfclean$MSSubClass <- as.character(dfclean$MSSubClass)
 
-## Redefine levels
+## Get variable types
 dfvartypes <- unlist(lapply(dfclean, class))
 
 charvars <- names(dfvartypes[which(dfvartypes %in% c('factor', 'character'))])
 numvars <- names(dfvartypes[which(dfvartypes %in% c('integer', 'numeric') & 
                                     !(names(dfvartypes) %in% c('Id', "SalePrice")))])
 
-# Ensure character levels are represent across both train and test
+# Ensure character levels are represent across both train and test ----
 apply(dfclean[charvars], 2, table, dfclean$set)
 
 
@@ -263,17 +252,19 @@ dfclean$PoolQC <- ifelse(dfclean$PoolQC == 'None', 'None', 'Pool')
 
 dfclean$MiscFeature <- ifelse(dfclean$MiscFeature == 'None', 'None', 'Feat')
 
+dfclean$MultiKitchen <- ifelse(dfclean$KitchenAbvGr > 1, 'Multi', 'Single')
+
+
+
 # Create factors from character variables
 dfcleanf <- dfclean %>% 
   mutate(across(where(is.character), as.factor))
 
-# Create new variables
-dfcleanf$TotSF <- dfcleanf$TotalBsmtSF + dfcleanf$X1stFlrSF + dfcleanf$X2ndFlrSF
+
+str(dfcleanf)
 
 
-
-
-# Ensure numeric variables have similar distributions across both train and test
+# Ensure numeric variables have similar distributions across both train and test ----
 
 for (var in numvars) {
   print(var)
@@ -290,41 +281,102 @@ for (var in numvars) {
 
 
 
+# Transformations and create some new variables
 
-# Define variable lists
+dfcleanf$MiscVal <- log10(dfcleanf$MiscVal + 1)
+dfcleanf$PoolArea <- log10(dfcleanf$PoolArea + 1)
+dfcleanf$ScreenPorch <- log10(dfcleanf$ScreenPorch + 1)
+dfcleanf$X3SsnPorch <- log10(dfcleanf$X3SsnPorch + 1)
+dfcleanf$EnclosedPorch <- log10(dfcleanf$EnclosedPorch + 1)
 
-str(dfcleanf)
+dfcleanf$LotArea <- log10(dfcleanf$LotArea + 1)
+
+dfcleanf$TotFullBaths <- dfcleanf$FullBath + dfcleanf$BsmtFullBath
+dfcleanf$TotHalfBaths <- dfcleanf$HalfBath + dfcleanf$BsmtHalfBath
 
 
 
-continuous <- c("LotFrontage", 
-                "LotArea", 
-                "YearBuilt",
-                "YearRemodAdd",
-                "MasVnrArea",
-                "TotalBsmtSF",
-                "KitchenQual"
-                
+# Split back into training and submission datasets ----
+training_data <- dfcleanf[dfcleanf$set == 'Train', -which(names(dfcleanf) == 'set')]
+
+submission_data <- dfcleanf[dfcleanf$set == 'Test', -which(names(dfcleanf) %in% c('set', 'SalePrice'))]
+
+
+
+# Data splits for modelling ----
+
+house_split <- initial_split(training_data, strata = SalePrice, breaks = 10, prop = 3/4)
+
+house_train <- training(house_split)
+
+house_test <- testing(house_split)
+
+
+
+# Preprocessing steps ----
+
+house_recipe <- house_train %>% 
+  recipe(SalePrice ~ .) %>% 
+  update_role(Id, new_role = "ID")
+  
+
+roles <- summary(house_recipe)
+  View(roles)
+
+
+
+iris_recipe <- training(iris_split) %>%
+  recipe(Species ~.) %>%
+  step_corr(all_predictors()) %>%
+  step_center(all_predictors(), -all_outcomes()) %>%
+  step_scale(all_predictors(), -all_outcomes()) %>%
+  prep()
+
+
+
+# Define model with tuning parameters ----
+
+tune_spec <- random_forest(
+  x = tune(),
+  mtry = tune()
 )
 
-categorical <- c("MSSubClass",
-                 "MSZoning",
-                 "Street",
-                 "Alley",
-                 "LotShape",
-                 "LandContour",
-                 "utili"
-                 )
+
+tune_spec <- 
+  decision_tree(
+    cost_complexity = tune(),
+    tree_depth = tune()
+  ) %>% 
+  set_engine("rpart") %>% 
+  set_mode("classification")
 
 
 
 
-## Notes
-#' Combine Basement vars?
-#' Percent 1st floor footage
-#' Combine bathroom vars
-#' Binary flags for certain categorical?
-#' Create total sqr footage
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
