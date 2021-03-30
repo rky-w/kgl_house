@@ -3,6 +3,10 @@
 
 library(tidyverse)
 library(tidymodels)
+library(tictoc)
+library(doParallel)
+library(vip)
+
 
 
 ## Data Loading ----
@@ -87,6 +91,14 @@ dfclean$BsmtQual <- charcheck(df$BsmtQual, impNA = TRUE, impNAval = "TA")
 dfclean$BsmtCond <- charcheck(df$BsmtCond, impNA = TRUE, impNAval = "TA")
 
 dfclean$BsmtExposure <- charcheck(df$BsmtExposure, impNA = TRUE, impNAval = "No")
+
+dfclean$BsmtFinType1 <- charcheck(df$BsmtFinType1, impNA = TRUE, impNAval = "None")
+
+dfclean$BsmtFinType2 <- charcheck(df$BsmtFinType2, impNA = TRUE, impNAval = "None")
+
+dfclean$BsmtFinSF1 <- numcheck(df$BsmtFinSF1, impNA = TRUE, impNAval = median(rawtrain$BsmtFinSF1, na.rm = TRUE))
+
+dfclean$BsmtFinSF2 <- numcheck(df$BsmtFinSF2, impNA = TRUE, impNAval = median(rawtrain$BsmtFinSF2, na.rm = TRUE))
 
 dfclean$TotalBsmtSF <- numcheck(df$TotalBsmtSF, impNA = TRUE, impNAval = median(rawtrain$TotalBsmtSF, na.rm = TRUE))
 
@@ -317,59 +329,102 @@ house_test <- testing(house_split)
 
 house_recipe <- house_train %>% 
   recipe(SalePrice ~ .) %>% 
-  update_role(Id, new_role = "ID")
+  update_role(Id, new_role = "ID") %>% 
+  step_corr(all_numeric(), -all_outcomes(), threshold = .9) %>% 
+  step_zv(all_predictors())
   
 
-roles <- summary(house_recipe)
-  View(roles)
+# Define model spec and tuning parameters ----
+
+rf_spec <- rand_forest(
+  mode = "regression",
+  mtry = tune(),
+  trees = 500,
+  min_n = tune()
+) %>% 
+  set_engine("ranger", importance = "impurity")
 
 
-
-iris_recipe <- training(iris_split) %>%
-  recipe(Species ~.) %>%
-  step_corr(all_predictors()) %>%
-  step_center(all_predictors(), -all_outcomes()) %>%
-  step_scale(all_predictors(), -all_outcomes()) %>%
-  prep()
-
-
-
-# Define model with tuning parameters ----
-
-tune_spec <- random_forest(
-  x = tune(),
-  mtry = tune()
+rf_grid <- grid_regular(
+  mtry(c(4, 80)),
+  min_n(c(1, 5)),
+  levels = 20
 )
 
-
-tune_spec <- 
-  decision_tree(
-    cost_complexity = tune(),
-    tree_depth = tune()
-  ) %>% 
-  set_engine("rpart") %>% 
-  set_mode("classification")
+sapply(rf_grid, unique)
 
 
 
+# Build model and cross-validate ----
+
+set.seed(345)
+
+cv_data <- vfold_cv(house_train, v = 8, repeats = 8, strata = SalePrice, breaks = 10)
+
+house_wf <- workflow() %>%
+  add_recipe(house_recipe) %>% 
+  add_model(rf_spec)
+
+
+# Set up parallel processing
+ncores <- parallel::detectCores()
+cl <- makePSOCKcluster(ncores)
+registerDoParallel(cl)
+
+# Tune models
+tic()
+tree_res <- 
+  house_wf %>% 
+  tune_grid(
+    resamples = cv_data,
+    grid = rf_grid
+  )
+toc()
+stopCluster(cl)
+registerDoSEQ()
+getDoParWorkers()
+
+
+# Assess tuning results
+tree_res %>% 
+  collect_metrics() %>% 
+  # filter(.metric == 'rmse') %>% 
+  ggplot(aes(mtry, mean, colour = as.factor(min_n))) +
+  geom_point() +
+  geom_line() + 
+  facet_wrap(~ .metric, ncol = 1, scales = "free_y") +
+  theme(legend.position = "bottom") +
+  labs(title = "Tuning results")
 
 
 
+tree_res %>% 
+  show_best("rmse")
 
 
+best_mod <- tree_res %>% 
+  select_best("rmse")
 
 
+# Finalize model ----
+
+final_wf <- house_wf %>% 
+  finalize_workflow(best_mod)
+
+final_fit <- final_wf %>% 
+  fit(data = training_data)
+
+final_fit
 
 
+# Variable importance
+final_fit %>% pull_workflow_fit() %>% 
+  vip()
 
 
+# Check on test set ----
 
-
-
-
-
-
-
+cbind(house_test$Id, predict(final_fit, house_test)) %>% head()
 
 
 
