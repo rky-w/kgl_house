@@ -100,7 +100,13 @@ dfclean$BsmtFinSF1 <- numcheck(df$BsmtFinSF1, impNA = TRUE, impNAval = median(ra
 
 dfclean$BsmtFinSF2 <- numcheck(df$BsmtFinSF2, impNA = TRUE, impNAval = median(rawtrain$BsmtFinSF2, na.rm = TRUE))
 
+dfclean$BsmtUnfSF <- numcheck(df$BsmtUnfSF, impNA = TRUE, impNAval = median(rawtrain$BsmtUnfSF, na.rm = TRUE))
+
 dfclean$TotalBsmtSF <- numcheck(df$TotalBsmtSF, impNA = TRUE, impNAval = median(rawtrain$TotalBsmtSF, na.rm = TRUE))
+
+dfclean$BsmtFullBath <- numcheck(df$BsmtFullBath, impNA = TRUE, impNAval = median(rawtrain$BsmtFullBath, na.rm = TRUE))
+
+dfclean$BsmtHalfBath <- numcheck(df$BsmtHalfBath, impNA = TRUE, impNAval = median(rawtrain$BsmtHalfBath, na.rm = TRUE))
 
 dfclean$Electrical <- charcheck(df$Electrical, impNA = TRUE, impNAval = "SBrkr")
 
@@ -346,11 +352,12 @@ rf_spec <- rand_forest(
 
 
 rf_grid <- grid_regular(
-  mtry(c(4, 80)),
+  mtry(c(5, 50)),
   min_n(c(1, 5)),
-  levels = 20
+  levels = 10
 )
 
+dim(rf_grid)
 sapply(rf_grid, unique)
 
 
@@ -423,16 +430,21 @@ final_fit %>% pull_workflow_fit() %>%
 
 
 # Check on test set ----
+predout <- cbind(house_test$Id, predict(final_fit, house_test))
+names(predout) <- c('Id', 'PredPrice')
 
-cbind(house_test$Id, predict(final_fit, house_test)) %>% head()
+testset <- house_test %>% 
+  select(Id, SalePrice) %>% 
+  inner_join(predout, by = "Id")
 
+rmse(testset, truth = SalePrice, estimate = PredPrice)
+rsq(testset, truth = SalePrice, estimate = PredPrice)
 
+# Produce final test predictions ----
+submission_preds <- cbind(submission_data$Id, predict(final_fit, submission_data))
+names(submission_preds) <- c("Id", "SalePrice")
 
-
-
-
-
-
-
-
+write.csv(submission_preds,
+          file = "./data/output/submission.csv",
+          row.names = FALSE)
 
